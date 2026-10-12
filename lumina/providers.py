@@ -19,14 +19,17 @@ class ProviderResult:
 class QuoteProvider(Protocol):
     name: str
 
-    def select(self, query: str, chunks: list[Chunk]) -> ProviderResult: ...
+    def select(self, query: str, chunks: list[Chunk],
+               candidates: list[Selection] | None = None) -> ProviderResult: ...
 
 
 class FakeProvider:
     name = "fake"
 
-    def select(self, query: str, chunks: list[Chunk]) -> ProviderResult:
-        return ProviderResult(excerpts(query, chunks)[:3])
+    def select(self, query: str, chunks: list[Chunk],
+               candidates: list[Selection] | None = None) -> ProviderResult:
+        evidence = candidates if candidates is not None else excerpts(query, chunks)
+        return ProviderResult(evidence[:3])
 
 
 class HTTPProvider:
@@ -37,7 +40,8 @@ class HTTPProvider:
             raise ValueError("Provider, model and API key are required")
         self.name, self.model, self.api_key = name, model, api_key
 
-    def select(self, query: str, chunks: list[Chunk]) -> ProviderResult:
+    def select(self, query: str, chunks: list[Chunk],
+               candidates: list[Selection] | None = None) -> ProviderResult:
         import httpx
 
         evidence = [{"chunk_id": c.id, "text": c.text[:4000]} for c in chunks[:5]]

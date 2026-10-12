@@ -7,6 +7,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from lumina.cache import RedisCache
+from lumina.embeddings import OfflineEmbedder, SemanticEmbedder
+from lumina.evaluate import evaluate_postgres
 from lumina.migrate import migrate
 from lumina.service import LuminaService
 from lumina.store import PostgresStore
@@ -23,11 +25,14 @@ def test_postgres_pgvector_redis_end_to_end():
     marker = uuid4().hex
     source = f"integration_{marker}.md"
     query = f"{marker} audit logs retention"
-    service.ingest(f"# Policy\n{marker} audit logs retention is 30 days.".encode(), source)
-    result = service.answer(query)
-    assert not result.answer.refused
-    assert any(c.source == source for c in result.answer.citations)
-    assert service.answer(query).cache_hit
+    try:
+        service.ingest(f"# Policy\n{marker} audit logs retention is 30 days.".encode(), source)
+        result = service.answer(query)
+        assert not result.answer.refused
+        assert any(c.source == source for c in result.answer.citations)
+        assert service.answer(query).cache_hit
+    finally:
+        service.delete(source)
     identity = f"integration-{uuid4().hex}"
     assert service.cache.allow(identity, limit=1)
     assert not service.cache.allow(identity, limit=1)
@@ -54,3 +59,45 @@ def test_mcp_stdio_tools():
                 assert not missing.isError
 
     asyncio.run(check())
+
+
+@pytest.mark.integration
+def test_postgres_evaluation_uses_disposable_schema():
+    dsn = os.getenv("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("Set TEST_DATABASE_URL for database evaluation")
+    report = evaluate_postgres(dsn)
+    assert report["backend"] == "postgresql-pgvector"
+    assert report["metrics"]["hybrid"]["retrieval_cases"] == 8
+
+
+@pytest.mark.integration
+def test_postgres_keeps_embedding_dimensions_separate():
+    dsn = os.getenv("TEST_DATABASE_URL")
+    if not dsn:
+        pytest.skip("Set TEST_DATABASE_URL for model isolation")
+    migrate(dsn)
+
+    class SemanticStub:
+        model = SemanticEmbedder.model
+        dimensions = SemanticEmbedder.dimensions
+
+        def embed(self, text):
+            return [1.0] + [0.0] * (self.dimensions - 1)
+
+        def embed_query(self, text):
+            return self.embed(text)
+
+    store = PostgresStore(dsn)
+    hashed = LuminaService(store, embedder=OfflineEmbedder())
+    semantic = LuminaService(store, embedder=SemanticStub())
+    marker = uuid4().hex
+    hash_source, semantic_source = f"hash_{marker}.md", f"semantic_{marker}.md"
+    try:
+        hashed.ingest(b"Audit logs retention is 30 days.", hash_source)
+        semantic.ingest(b"Audit logs retention is 60 days.", semantic_source)
+        assert all(h.chunk.source != semantic_source for h in hashed.search("audit logs retention"))
+        assert all(h.chunk.source != hash_source for h in semantic.search("audit logs retention"))
+    finally:
+        store.delete(hash_source)
+        store.delete(semantic_source)

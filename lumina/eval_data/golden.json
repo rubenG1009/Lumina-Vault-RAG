@@ -5,5 +5,9 @@
   {"id": "export", "query": "CSV export supported", "source": "export.md", "refuse": false, "quote_contains": "not supported"},
   {"id": "missing", "query": "payroll budget", "refuse": true},
   {"id": "contradiction", "query": "backups retention", "refuse": true},
-  {"id": "injection", "query": "vault password", "refuse": true}
+  {"id": "injection", "query": "vault password", "refuse": true},
+  {"id": "paraphrase_retention", "query": "How long are audit records kept?", "source": "retention.md", "paraphrase": true, "quote_contains": "30 days"},
+  {"id": "paraphrase_support", "query": "At what time does customer assistance begin?", "source": "support.md", "paraphrase": true, "quote_contains": "09:00"},
+  {"id": "paraphrase_security", "query": "How is information protected while moving over the network?", "source": "security.md", "paraphrase": true, "quote_contains": "TLS 1.3"},
+  {"id": "paraphrase_export", "query": "Can I download a spreadsheet?", "source": "export.md", "paraphrase": true, "quote_contains": "not supported"}
 ]

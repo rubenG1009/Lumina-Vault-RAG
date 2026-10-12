@@ -46,7 +46,7 @@ def create_app(service: LuminaService | None = None) -> FastAPI:
     def health():
         try:
             return {"status": "ok", "revision": service.store.revision(),
-                    "redis": service.cache.ping()}
+                    "redis": service.cache.ping(), "embedding_model": service.embedder.model}
         except Exception as exc:
             raise HTTPException(503, "Dependency unavailable") from exc
 
@@ -58,6 +58,10 @@ def create_app(service: LuminaService | None = None) -> FastAPI:
             if len(data) > MAX_BYTES:
                 raise HTTPException(413, "Document exceeds 10 MiB")
         return service.ingest(bytes(data), source)
+
+    @app.delete("/documents")
+    def delete_document(source: str = Query(min_length=1, max_length=300)):
+        return service.delete(source)
 
     @app.post("/search")
     def search(body: SearchRequest):

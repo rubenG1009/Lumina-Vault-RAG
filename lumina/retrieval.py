@@ -50,10 +50,11 @@ class Retriever:
             raise ValueError("Query must be 1–2000 characters and k must be 1–20")
         if mode not in {"hybrid", "vector"}:
             raise ValueError("Mode must be hybrid or vector")
-        vector = self.embedder.embed(query)
+        vector = self.embedder.embed_query(query)
         if not any(vector):
             return []
-        vec, lex = self.store.ranked(query, vector, min(100, max(20, k * 4)), source)
+        vec, lex = self.store.ranked(query, vector, min(100, max(20, k * 4)),
+                                     source, self.embedder.model)
         # RRF scores are ranks, never confidence probabilities.
         hits = rrf([vec, lex]) if mode == "hybrid" else vec
         if self.reranker:

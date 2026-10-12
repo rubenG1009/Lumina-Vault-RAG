@@ -2,30 +2,38 @@ import hashlib
 import json
 from typing import Protocol
 
-from lumina.embeddings import EMBEDDING_MODEL, OfflineEmbedder, tokens
+from lumina.embeddings import EMBEDDING_MODEL, OfflineEmbedder, SemanticEmbedder, tokens
 from lumina.models import Chunk, Hit
 
 
 class Store(Protocol):
-    def replace(self, chunks: list[Chunk], embeddings: list[list[float]]) -> bool: ...
+    def replace(self, chunks: list[Chunk], embeddings: list[list[float]],
+                model: str = EMBEDDING_MODEL) -> bool: ...
     def get(self, chunk_id: str) -> Chunk | None: ...
+    def delete(self, source: str) -> bool: ...
     def revision(self) -> int: ...
     def ranked(self, query: str, vector: list[float], limit: int,
-               source: str | None = None) -> tuple[list[Hit], list[Hit]]: ...
+               source: str | None = None,
+               model: str = EMBEDDING_MODEL) -> tuple[list[Hit], list[Hit]]: ...
 
 
-def fingerprint(chunks: list[Chunk]) -> str:
+def fingerprint(chunks: list[Chunk], model: str = EMBEDDING_MODEL) -> str:
     return hashlib.sha256(json.dumps(
-        [c.to_dict() for c in chunks], sort_keys=True, ensure_ascii=False
+        {"chunks": [c.to_dict() for c in chunks], "model": model},
+        sort_keys=True, ensure_ascii=False
     ).encode()).hexdigest()
 
 
-def validate_batch(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
+def validate_batch(chunks: list[Chunk], embeddings: list[list[float]], model: str) -> None:
     if not chunks or len(chunks) != len(embeddings):
         raise ValueError("One embedding per chunk is required")
     if len({c.document_id for c in chunks}) != 1 or len({c.source for c in chunks}) != 1:
         raise ValueError("Ingest one document per transaction")
-    if any(len(v) != OfflineEmbedder.dimensions for v in embeddings):
+    dimensions = {EMBEDDING_MODEL: OfflineEmbedder.dimensions,
+                  SemanticEmbedder.model: SemanticEmbedder.dimensions}.get(model)
+    if dimensions is None:
+        raise ValueError("Unsupported embedding model")
+    if any(len(v) != dimensions for v in embeddings):
         raise ValueError("Embedding dimensions mismatch")
 
 
@@ -49,12 +57,13 @@ class PostgresStore:
 
         return psycopg.connect(self.dsn, row_factory=dict_row, connect_timeout=5)
 
-    def replace(self, chunks: list[Chunk], embeddings: list[list[float]]) -> bool:
+    def replace(self, chunks: list[Chunk], embeddings: list[list[float]],
+                model: str = EMBEDDING_MODEL) -> bool:
         from psycopg.types.json import Jsonb
 
-        validate_batch(chunks, embeddings)
+        validate_batch(chunks, embeddings, model)
         first = chunks[0]
-        mark = fingerprint(chunks)
+        mark = fingerprint(chunks, model)
         with self.connect() as conn:
             # Serializes replacement/revision updates, including first-time documents.
             conn.execute("SELECT revision FROM corpus_state FOR UPDATE")
@@ -71,7 +80,7 @@ class PostgresStore:
                     metadata,embedding,embedding_model
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s)""", [
                     (c.id, c.document_id, c.text, c.source, c.title, c.section, c.page,
-                     c.start, c.end, Jsonb(c.metadata), _vector(v), EMBEDDING_MODEL)
+                     c.start, c.end, Jsonb(c.metadata), _vector(v), model)
                     for c, v in zip(chunks, embeddings, strict=True)
                 ])
             conn.execute("UPDATE corpus_state SET revision=revision+1")
@@ -82,24 +91,34 @@ class PostgresStore:
             row = conn.execute("SELECT * FROM chunks WHERE id=%s", (chunk_id,)).fetchone()
         return _chunk(row) if row else None
 
+    def delete(self, source: str) -> bool:
+        with self.connect() as conn:
+            conn.execute("SELECT revision FROM corpus_state FOR UPDATE")
+            deleted = conn.execute("DELETE FROM documents WHERE source=%s RETURNING id",
+                                   (source,)).fetchone()
+            if deleted:
+                conn.execute("UPDATE corpus_state SET revision=revision+1")
+        return deleted is not None
+
     def revision(self) -> int:
         with self.connect() as conn:
             return conn.execute("SELECT revision FROM corpus_state").fetchone()["revision"]
 
     def ranked(self, query: str, vector: list[float], limit: int,
-               source: str | None = None) -> tuple[list[Hit], list[Hit]]:
+               source: str | None = None,
+               model: str = EMBEDDING_MODEL) -> tuple[list[Hit], list[Hit]]:
         with self.connect() as conn:
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             vec = conn.execute("""SELECT *, 1-(embedding <=> %s::vector) AS score
-                FROM chunks WHERE (%s::text IS NULL OR source=%s)
+                FROM chunks WHERE embedding_model=%s AND (%s::text IS NULL OR source=%s)
                 ORDER BY embedding <=> %s::vector, id LIMIT %s""",
-                (_vector(vector), source, source, _vector(vector), limit)).fetchall()
+                (_vector(vector), model, source, source, _vector(vector), limit)).fetchall()
             lex = conn.execute("""SELECT *, ts_rank_cd(search_tsv,
                 plainto_tsquery('english', %s)) AS score FROM chunks
-                WHERE search_tsv @@ plainto_tsquery('english', %s)
+                WHERE embedding_model=%s AND search_tsv @@ plainto_tsquery('english', %s)
                 AND (%s::text IS NULL OR source=%s)
                 ORDER BY score DESC, id LIMIT %s""",
-                (query, query, source, source, limit)).fetchall()
+                (query, model, query, source, source, limit)).fetchall()
         return ([Hit(_chunk(r), float(r["score"])) for r in vec if r["score"] is not None],
                 [Hit(_chunk(r), float(r["score"])) for r in lex])
 
@@ -109,20 +128,24 @@ class MemoryStore:
     def __init__(self):
         self.chunks: dict[str, Chunk] = {}
         self.vectors: dict[str, list[float]] = {}
+        self.models: dict[str, str] = {}
         self.fingerprints: dict[str, str] = {}
         self._revision = 0
 
-    def replace(self, chunks: list[Chunk], embeddings: list[list[float]]) -> bool:
-        validate_batch(chunks, embeddings)
+    def replace(self, chunks: list[Chunk], embeddings: list[list[float]],
+                model: str = EMBEDDING_MODEL) -> bool:
+        validate_batch(chunks, embeddings, model)
         doc = chunks[0].document_id
-        mark = fingerprint(chunks)
+        mark = fingerprint(chunks, model)
         if self.fingerprints.get(doc) == mark:
             return False
         for key in [k for k, c in self.chunks.items() if c.document_id == doc]:
             del self.chunks[key]
             del self.vectors[key]
+            del self.models[key]
         for c, v in zip(chunks, embeddings, strict=True):
             self.chunks[c.id], self.vectors[c.id] = c, v
+            self.models[c.id] = model
         self.fingerprints[doc] = mark
         self._revision += 1
         return True
@@ -130,12 +153,27 @@ class MemoryStore:
     def get(self, chunk_id: str) -> Chunk | None:
         return self.chunks.get(chunk_id)
 
+    def delete(self, source: str) -> bool:
+        ids = [key for key, chunk in self.chunks.items() if chunk.source == source]
+        if not ids:
+            return False
+        for key in ids:
+            document_id = self.chunks[key].document_id
+            del self.chunks[key]
+            del self.vectors[key]
+            del self.models[key]
+            self.fingerprints.pop(document_id, None)
+        self._revision += 1
+        return True
+
     def revision(self) -> int:
         return self._revision
 
     def ranked(self, query: str, vector: list[float], limit: int,
-               source: str | None = None) -> tuple[list[Hit], list[Hit]]:
-        candidates = [c for c in self.chunks.values() if source is None or c.source == source]
+               source: str | None = None,
+               model: str = EMBEDDING_MODEL) -> tuple[list[Hit], list[Hit]]:
+        candidates = [c for c in self.chunks.values()
+                      if self.models[c.id] == model and (source is None or c.source == source)]
         query_terms = set(tokens(query))
         vec = [Hit(c, sum(a*b for a, b in zip(vector, self.vectors[c.id], strict=True)))
                for c in candidates]

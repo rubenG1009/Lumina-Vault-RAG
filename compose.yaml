@@ -23,11 +23,15 @@ services:
       retries: 20
 
   api:
-    build: .
+    build:
+      context: .
+      args:
+        LUMINA_EMBEDDING_BACKEND: ${LUMINA_EMBEDDING_BACKEND:-hash}
     environment:
       DATABASE_URL: postgresql://lumina:local-demo-only@db:5432/lumina
       REDIS_URL: redis://redis:6379/0
       LUMINA_PROVIDER: fake
+      LUMINA_EMBEDDING_BACKEND: ${LUMINA_EMBEDDING_BACKEND:-hash}
     ports:
       - "127.0.0.1:18765:8000"
     depends_on:
@@ -35,6 +39,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - modelcache:/home/lumina/.cache/fastembed
 
 volumes:
   pgdata:
+  modelcache:

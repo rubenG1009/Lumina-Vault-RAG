@@ -27,3 +27,26 @@ class OfflineEmbedder:
             vector[index] += 1 if digest[4] & 1 else -1
         norm = math.sqrt(sum(v * v for v in vector))
         return [v / norm for v in vector] if norm else vector
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed(text)
+
+
+class SemanticEmbedder:
+    """Optional local ONNX sentence embeddings; the model is downloaded on first use."""
+
+    model = "BAAI/bge-small-en-v1.5"
+    dimensions = 384
+
+    def __init__(self):
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as exc:
+            raise RuntimeError("Install the semantic extra: pip install '.[semantic]'") from exc
+        self._model = TextEmbedding(model_name=self.model)
+
+    def embed(self, text: str) -> list[float]:
+        return list(self._model.passage_embed([text]))[0].tolist()
+
+    def embed_query(self, text: str) -> list[float]:
+        return list(self._model.query_embed([text]))[0].tolist()

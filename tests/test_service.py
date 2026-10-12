@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from lumina.api import create_app
 from lumina.cache import NullCache
+from lumina.embeddings import SemanticEmbedder
 from lumina.service import LuminaService
 from lumina.store import MemoryStore
 
@@ -29,6 +30,25 @@ def test_service_cache_and_revision_invalidation():
     assert not third.cache_hit and "60 days" in third.answer.text
 
 
+def test_semantic_evidence_can_quote_a_paraphrase():
+    class SemanticStub:
+        model = SemanticEmbedder.model
+        dimensions = SemanticEmbedder.dimensions
+
+        def embed(self, text):
+            return [1.0] + [0.0] * (self.dimensions - 1)
+
+        def embed_query(self, text):
+            return self.embed(text)
+
+    service = LuminaService(MemoryStore(), embedder=SemanticStub())
+    service.ingest(b"Audit logs retention is 30 days.", "policy.md")
+    result = service.answer("When are records erased?")
+    assert not result.answer.refused
+    assert result.answer.citations[0].source == "policy.md"
+    assert result.answer.citations[0].quote == "Audit logs retention is 30 days."
+
+
 def test_api_ingest_search_answer_and_agent():
     client = TestClient(create_app(LuminaService(MemoryStore(), CountingCache())))
     assert client.get("/health").json()["status"] == "ok"
@@ -45,6 +65,10 @@ def test_api_ingest_search_answer_and_agent():
     agent = client.post("/agent", json={"query": "audit logs retention"}).json()
     assert not agent["answer"]["refused"]
     assert [step["tool"] for step in agent["steps"]] == ["search_docs", "get_chunk"]
+    deleted = client.delete("/documents?source=policy.md").json()
+    assert deleted["deleted"]
+    assert client.post("/answer", json={"query": "audit logs retention"}).json()[
+        "answer"]["refused"]
     assert client.post("/search", json={"query": "x", "mode": "bad"}).status_code == 422
 
 

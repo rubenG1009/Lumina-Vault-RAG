@@ -6,7 +6,7 @@ from lumina.embeddings import tokens
 from lumina.models import Chunk, Hit
 
 REFUSAL = "I cannot answer from the available document evidence."
-ANSWER_POLICY = "quotes-v1"
+ANSWER_POLICY = "quotes-v2-semantic"
 UNSAFE = re.compile(
     r"ignore\s+(?:all\s+)?(?:previous|prior|above|system)|"
     r"(?:system|developer)\s*(?:prompt|message|instruction)|"
@@ -67,6 +67,25 @@ def excerpts(query: str, chunks: list[Chunk]) -> list[Selection]:
     return result
 
 
+def semantic_excerpts(query: str, chunks: list[Chunk], embedder,
+                      threshold: float = 0.67) -> list[Selection]:
+    """Select exact sentences using a conservative local cosine threshold."""
+    query_vector = embedder.embed_query(query)
+    scored = []
+    for chunk in chunks:
+        if UNSAFE.search(chunk.text):
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", chunk.text):
+            sentence = sentence.strip()
+            if not 0 < len(sentence) <= 600:
+                continue
+            vector = embedder.embed(sentence)
+            score = sum(a * b for a, b in zip(query_vector, vector, strict=True))
+            if score >= threshold:
+                scored.append((score, Selection(chunk.id, sentence)))
+    return [selection for _, selection in sorted(scored, key=lambda x: -x[0])]
+
+
 def conflicts(selections: list[Selection]) -> bool:
     """Conservative numeric/negation heuristic; not general contradiction detection."""
     for index, left in enumerate(selections):
@@ -91,9 +110,12 @@ def conflicts(selections: list[Selection]) -> bool:
     return False
 
 
-def eligible(query: str, hits: list[Hit]) -> tuple[list[Chunk], str | None]:
+def eligible(query: str, hits: list[Hit],
+             candidates: list[Selection] | None = None) -> tuple[list[Chunk], str | None]:
     chunks = [h.chunk for h in hits if not UNSAFE.search(h.chunk.text)]
-    evidence = excerpts(query, chunks)
+    safe_ids = {c.id for c in chunks}
+    evidence = (excerpts(query, chunks) if candidates is None else
+                [s for s in candidates if s.chunk_id in safe_ids])
     if not evidence:
         return [], "no_evidence"
     # Inspect the entire retrieved evidence before a provider can cherry-pick it.
@@ -103,7 +125,8 @@ def eligible(query: str, hits: list[Hit]) -> tuple[list[Chunk], str | None]:
     return [c for c in chunks if c.id in ids], None
 
 
-def verify(query: str, selections: list[Selection], chunks: list[Chunk]) -> Answer:
+def verify(query: str, selections: list[Selection], chunks: list[Chunk],
+           allowed_quotes: set[Selection] | None = None) -> Answer:
     if not selections or len(selections) > 3:
         return Answer(reason="invalid_provider_output")
     allowed = {c.id: c for c in chunks}
@@ -113,7 +136,8 @@ def verify(query: str, selections: list[Selection], chunks: list[Chunk]) -> Answ
         chunk = allowed.get(selection.chunk_id)
         if (chunk is None or not selection.quote or len(selection.quote) > 600
                 or selection.quote not in chunk.text or UNSAFE.search(selection.quote)
-                or not relevant(query, selection.quote)):
+                or (selection not in allowed_quotes if allowed_quotes is not None
+                    else not relevant(query, selection.quote))):
             return Answer(reason="invalid_citation")
         identity = (chunk.id, selection.quote)
         if identity in seen:

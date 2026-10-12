@@ -24,6 +24,7 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 3s --health-retries 20
     env:
+      DATABASE_URL: postgresql://lumina:local-demo-only@localhost:5432/lumina_test
       TEST_DATABASE_URL: postgresql://lumina:local-demo-only@localhost:5432/lumina_test
       TEST_REDIS_URL: redis://localhost:6379/0
     steps:
@@ -35,3 +36,4 @@ jobs:
       - run: ruff check lumina tests
       - run: pytest -q
       - run: lumina eval --output evals/results-ci.json
+      - run: lumina eval --database --output evals/results-ci-postgres.json
