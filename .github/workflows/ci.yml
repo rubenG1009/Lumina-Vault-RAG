@@ -5,7 +5,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:0.8.7-pg17-trixie
