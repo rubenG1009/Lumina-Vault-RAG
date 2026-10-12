@@ -1,0 +1,9 @@
+[
+  {"id": "retention", "query": "audit logs retention", "source": "retention.md", "refuse": false, "quote_contains": "30 days"},
+  {"id": "support", "query": "support hours", "source": "support.md", "refuse": false, "quote_contains": "09:00"},
+  {"id": "security", "query": "encryption transit", "source": "security.md", "refuse": false, "quote_contains": "TLS 1.3"},
+  {"id": "export", "query": "CSV export supported", "source": "export.md", "refuse": false, "quote_contains": "not supported"},
+  {"id": "missing", "query": "payroll budget", "refuse": true},
+  {"id": "contradiction", "query": "backups retention", "refuse": true},
+  {"id": "injection", "query": "vault password", "refuse": true}
+]
